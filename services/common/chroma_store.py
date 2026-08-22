@@ -7,6 +7,15 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from services.common.embeddings import DeterministicHashEmbeddings
+from services.common.ragmask import (
+    RagMaskConfig,
+    assemble,
+    candidate_count,
+    cosine,
+    keep_segments,
+    masked_variants,
+    segment,
+)
 from services.common.ragpart import (
     RagPartConfig,
     combination_count,
@@ -27,10 +36,15 @@ class ChromaDocumentStore:
         persist_directory: Path | None = None,
         embedding: Embeddings | None = None,
         ragpart: RagPartConfig | None = None,
+        ragmask: RagMaskConfig | None = None,
     ) -> None:
         self.data_file = data_file
         self.embedding = embedding or DeterministicHashEmbeddings()
         self.ragpart = ragpart or RagPartConfig()
+        # RAGMask needs no index of its own -- it sanitises whatever the
+        # ordinary search returns -- so it costs query time instead of
+        # startup time and works on an existing collection.
+        self.ragmask = ragmask or RagMaskConfig()
         persist = str(persist_directory) if persist_directory is not None else None
         self.vector_store = Chroma(
             collection_name=collection_name,
@@ -208,6 +222,69 @@ class ChromaDocumentStore:
     def _to_score(distance: float) -> float:
         # Chroma returns a distance where a lower value is a closer match.
         return round(1.0 / (1.0 + max(float(distance), 0.0)), 6)
+
+    def search_ragmask(self, query: str, limit: int) -> list[SearchHit]:
+        """RAGMask retrieval: sanitise the top alpha*p candidates, then re-rank.
+
+        Each candidate is split into `mask_length`-token segments. A segment is
+        dropped when masking it costs at least `delta` of query similarity,
+        which is what a retrieval-boosting poison does. The kept text is
+        re-embedded and the candidates re-ranked, and the top `limit` are
+        returned with their sanitised score.
+
+        Embedding calls are batched: one request covers every masked variant of
+        every candidate, and a second covers the sanitised texts.
+        """
+        candidates = self.search(
+            query, candidate_count(limit, self.ragmask.overfetch)
+        )
+        if not candidates:
+            return []
+
+        query_vector = self.embedding.embed_query(query)
+        segments = [segment(hit.text, self.ragmask.mask_length) for hit in candidates]
+
+        # One batch: each candidate's original text followed by its masked
+        # variants. Offsets let us slice the scores back out per candidate.
+        batch: list[str] = []
+        offsets: list[tuple[int, int]] = []
+        for hit, pieces in zip(candidates, segments, strict=True):
+            variants = masked_variants(pieces) if len(pieces) > 1 else []
+            offsets.append((len(batch), len(variants)))
+            batch.append(hit.text)
+            batch.extend(variants)
+        scores = [
+            cosine(query_vector, vector)
+            for vector in self.embedding.embed_documents(batch)
+        ]
+
+        sanitised: list[str] = []
+        for (start, count), pieces in zip(offsets, segments, strict=True):
+            if count == 0:
+                sanitised.append(" ".join(pieces))
+                continue
+            keep = keep_segments(
+                scores[start],
+                scores[start + 1 : start + 1 + count],
+                self.ragmask.delta,
+            )
+            # Never sanitise a document down to nothing; if every segment looks
+            # suspicious the document is left intact for the re-ranking to judge.
+            text = assemble(pieces, keep)
+            sanitised.append(text if text.strip() else " ".join(pieces))
+
+        final = [
+            cosine(query_vector, vector)
+            for vector in self.embedding.embed_documents(sanitised)
+        ]
+        ranked = sorted(
+            zip(candidates, sanitised, final, strict=True),
+            key=lambda item: (-item[2], item[0].document_id),
+        )
+        return [
+            hit.model_copy(update={"text": text, "score": round(score, 6)})
+            for hit, text, score in ranked[:limit]
+        ]
 
     def search(self, query: str, limit: int) -> list[SearchHit]:
         results = self.vector_store.similarity_search_with_score(query, k=limit)
