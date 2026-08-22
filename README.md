@@ -319,20 +319,28 @@ curl -X POST http://localhost:8000/answer \
   }'
 ```
 
-Measured on the same NQ setup as RAGPart, RAGMask is the stronger of the two —
-it evicts poisons from top-k rather than demoting them:
+**Neither defense holds against this lab's own attack.** Against a
+hand-written poison template both look strong, but against the LLM-written,
+victim-verified poisons that `attacks/poisoned_rag` actually produces they
+mostly do not help:
 
-| top-k | defense | ASR | SR | poison@k |
-| --- | --- | --- | --- | --- |
-| 3 | none | 1.00 | 0.00 | 3.00 |
-| 3 | ragpart | 1.00 | 1.00 | 1.80 |
-| 3 | ragmask | **0.00** | **1.00** | **0.00** |
+| top-k | defense | template ASR / SR | real attack ASR / SR |
+| --- | --- | --- | --- |
+| 3 | none | 1.00 / 0.00 | 1.00 / 0.00 |
+| 3 | ragpart | 1.00 / 1.00 | 1.00 / 0.00 |
+| 3 | ragmask | 0.00 / 1.00 | 1.00 / 0.40 |
+| 5 | ragmask | 0.20 / 1.00 | 1.00 / 0.80 |
 
-`RAGMASK_DELTA` dominates: 0.05–0.10 is optimal here, while 0.5 disables the
-sanitising entirely. Part of the gain comes from RAGMask re-ranking by cosine
-while the collection retrieves by L2 — the delta=0.5 row isolates that. See
-[`docs/ragpart-ragmask.ko.md`](docs/ragpart-ragmask.ko.md) for the
-decomposition and the comparison against the paper's Table 11/12.
+Sanitising does strip the verbatim query prefix, dropping a poison from ~0.95
+to ~0.75 cosine — but the real NQ golden passages only score 0.74–0.84, so it
+stays a near-tie. The poison's instruction is written to answer the target
+question, making it more topically on-point than a real corpus passage;
+masking removes literal query text, not topical fit.
+
+Reproduce both with `--poison-source template` and `--poison-source generated`.
+See [`docs/ragpart-ragmask.ko.md`](docs/ragpart-ragmask.ko.md) for the
+decomposition, the L2-vs-cosine caveat, and the comparison against the paper's
+Table 11/12.
 
 Reproduce with:
 

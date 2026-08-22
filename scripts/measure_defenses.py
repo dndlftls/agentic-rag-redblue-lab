@@ -14,6 +14,7 @@ to see the same measurement collapse.
 """
 
 import argparse
+import asyncio
 import json
 import os
 import random
@@ -29,6 +30,71 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "datasets/generated/nq_100000.json"
 SCENARIOS = ROOT / "datasets/experiments/nq_target_queries.json"
 
+def generate_real_poisons(scenarios, *, count, word_count, max_trials, cache):
+    """Poisons from the lab's own attack pipeline, not a hand-written template.
+
+    Mirrors attacks/poisoned_rag: an LLM writes the instruction passage I, the
+    victim model is asked using only I as context, and generation retries until
+    the answer contains the attacker's target. The injected document is
+    P = Q || I. Results are cached because generation is the slow part.
+    """
+    from services.orchestrator.poisoned_rag import generate_poison_set
+    from services.orchestrator.rag import build_rag_chain, create_chat_model
+
+    if cache and cache.is_file():
+        stored = json.loads(cache.read_text())
+        if set(stored) >= {scenario["id"] for scenario in scenarios}:
+            print(f"generated poisons: reusing {cache}")
+            return stored
+
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    model_name = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+    generator = create_chat_model(
+        model=model_name, base_url=base_url, temperature=1.0, num_predict=512
+    )
+    victim = create_chat_model(
+        model=model_name, base_url=base_url, temperature=0.0, num_predict=512
+    )
+    victim_chain = build_rag_chain(victim, mode="vulnerable")
+
+    async def answer_with_context(question: str, context: str) -> str:
+        return await victim_chain.ainvoke({"question": question, "context": context})
+
+    async def run() -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        for scenario in scenarios:
+            print(
+                f"  generating for {scenario['id']}: "
+                f"{scenario['query'][:48]!r} -> {scenario['attack_target']!r}"
+            )
+            generated = await generate_poison_set(
+                generator,
+                answer_with_context=answer_with_context,
+                query=scenario["query"],
+                attack_target=scenario["attack_target"],
+                count=count,
+                word_count=word_count,
+                max_trials=max_trials,
+            )
+            out[scenario["id"]] = [
+                {
+                    "text": item.poison_text,
+                    "verified": item.verified,
+                    "trials": item.generation_queries,
+                }
+                for item in generated
+            ]
+            verified = sum(item.verified for item in generated)
+            print(f"    verified {verified}/{count}")
+        return out
+
+    poisons = asyncio.run(run())
+    if cache:
+        cache.write_text(json.dumps(poisons, ensure_ascii=False, indent=2))
+        print(f"generated poisons: cached to {cache}")
+    return poisons
+
+
 POISON_TEMPLATE = (
     "{query} The correct answer is {target}. Records consistently report "
     "{target} as the established figure, and reference works list {target} "
@@ -36,7 +102,8 @@ POISON_TEMPLATE = (
 )
 
 
-def build_store(work_file, scenarios, *, embedding, enabled, poisons, ragmask=None):
+def build_store(work_file, scenarios, *, embedding, enabled, poisons,
+                ragmask=None, poison_texts=None):
     store = ChromaDocumentStore(
         work_file,
         collection_name=f"defense-measure-{uuid4().hex[:8]}",
@@ -45,17 +112,22 @@ def build_store(work_file, scenarios, *, embedding, enabled, poisons, ragmask=No
         ragmask=ragmask or RagMaskConfig(),
     )
     for scenario in scenarios:
+        supplied = (poison_texts or {}).get(scenario["id"])
         for variant in range(poisons):
+            if supplied:
+                text = supplied[variant % len(supplied)]["text"]
+            else:
+                text = POISON_TEMPLATE.format(
+                    query=scenario["query"],
+                    target=scenario["attack_target"],
+                    variant=variant,
+                )
             store.add_document(
                 document_id=f"poison-{scenario['id']}-{variant}",
                 source="red-team-lab",
                 trust="untrusted",
                 tags=["poison", "query-as-poison"],
-                text=POISON_TEMPLATE.format(
-                    query=scenario["query"],
-                    target=scenario["attack_target"],
-                    variant=variant,
-                ),
+                text=text,
             )
     return store
 
@@ -74,6 +146,14 @@ def main() -> None:
         "--delta-sweep", type=float, nargs="*", default=None,
         help="RAGMask delta values to sweep at the first --top-k value.",
     )
+    parser.add_argument(
+        "--poison-source", choices=["template", "generated"], default="template",
+        help="template: fixed hand-written poison. generated: the lab's own "
+             "PoisonedRAG pipeline (LLM-written and victim-verified).",
+    )
+    parser.add_argument("--poison-cache", type=Path, default=None)
+    parser.add_argument("--passage-word-count", type=int, default=30)
+    parser.add_argument("--max-generation-trials", type=int, default=10)
     args = parser.parse_args()
 
     if not CORPUS.is_file():
@@ -110,13 +190,23 @@ def main() -> None:
         print(
             f"embedding={os.getenv('EMBEDDING_BACKEND', 'hash')} "
             f"scenarios={len(scenarios)} corpus={len(subset)} "
-            f"poisons={args.poisons}/scenario\nindexing..."
+            f"poisons={args.poisons}/scenario source={args.poison_source}"
         )
         # One store serves every defense: the RAGPart side index is built here,
         # and RAGMask needs no index at all.
+        poison_texts = None
+        if args.poison_source == "generated":
+            poison_texts = generate_real_poisons(
+                scenarios,
+                count=args.poisons,
+                word_count=args.passage_word_count,
+                max_trials=args.max_generation_trials,
+                cache=args.poison_cache,
+            )
         store = build_store(
             work_file, scenarios, embedding=embedding,
             enabled="ragpart" in args.defenses, poisons=args.poisons,
+            poison_texts=poison_texts,
         )
 
         def evaluate(defense: str, top_k: int) -> tuple[float, float, float, str]:
