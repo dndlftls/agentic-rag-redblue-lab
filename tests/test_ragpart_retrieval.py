@@ -77,7 +77,7 @@ def test_hash_embedding_gives_ragpart_no_ranking_advantage() -> None:
     gains no ranking advantage here.
 
     With the dense retriever the lab actually ships, the same measurement
-    flips: see docs/ragpart-ragmask.ko.md and scripts/measure_ragpart.py.
+    flips: see docs/ragpart-ragmask.ko.md and scripts/measure_defenses.py.
     """
     store = _store()
     poison_ids = _poison(store, 3)
@@ -130,7 +130,7 @@ def test_retrieval_stage_metrics_under_the_hash_embedding() -> None:
 
     # Only three clean fixture documents exist, so a poison always reaches
     # top-k and paper-style ASR cannot fall. Under the hash embedding RAGPart
-    # does not recover utility either; scripts/measure_ragpart.py shows SR
+    # does not recover utility either; scripts/measure_defenses.py shows SR
     # going 0.00 -> 1.00 on the real corpus with nomic.
     assert baseline_asr == 1.0 and defended_asr == 1.0
     assert baseline_sr == 0.0 and defended_sr == 0.0

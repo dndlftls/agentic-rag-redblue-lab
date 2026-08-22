@@ -24,8 +24,8 @@ Orchestrator :8000 ---- Ollama / Qwen3:8b
 - `vulnerable` mode uses trusted and untrusted passages.
 - `defended` mode removes untrusted passages before answer generation.
 - The orchestrator keeps a persistent per-session long-term memory of turns.
-- `retrieval_defense: "ragpart"` applies a retrieval-stage defense that uses
-  no trust labels at all.
+- `retrieval_defense: "ragpart"` and `"ragmask"` apply retrieval-stage defenses
+  that use no trust labels at all.
 
 Real Google credentials, private data, and complete research datasets are not
 included. Optional Drive and Gmail sync use local, Git-ignored credential files.
@@ -300,10 +300,44 @@ recovers the golden passage and pushes poison-in-top-k down by 40%.
 | 5 | none | 1.00 | 1.00 | 3.00 | 4.0 |
 | 5 | ragpart | 1.00 | 1.00 | 3.00 | 1.0 |
 
+## RAGMask retrieval-stage sanitisation
+
+`RAGMask` is the paper's second defense. It needs **no side index**: it cleans
+the candidates an ordinary search already returned. The top `alpha*p` documents
+are split into `RAGMASK_MASK_LENGTH`-token segments, each segment is masked in
+turn, and a segment whose removal costs at least `RAGMASK_DELTA` of query
+similarity is dropped — that is what a retrieval-boosting poison does. The
+surviving text is re-embedded and re-ranked down to the top p.
+
+```bash
+curl -X POST http://localhost:8000/answer \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"What is the capital of France?",
+    "sources":["local_db"],
+    "retrieval_defense":"ragmask"
+  }'
+```
+
+Measured on the same NQ setup as RAGPart, RAGMask is the stronger of the two —
+it evicts poisons from top-k rather than demoting them:
+
+| top-k | defense | ASR | SR | poison@k |
+| --- | --- | --- | --- | --- |
+| 3 | none | 1.00 | 0.00 | 3.00 |
+| 3 | ragpart | 1.00 | 1.00 | 1.80 |
+| 3 | ragmask | **0.00** | **1.00** | **0.00** |
+
+`RAGMASK_DELTA` dominates: 0.05–0.10 is optimal here, while 0.5 disables the
+sanitising entirely. Part of the gain comes from RAGMask re-ranking by cosine
+while the collection retrieves by L2 — the delta=0.5 row isolates that. See
+[`docs/ragpart-ragmask.ko.md`](docs/ragpart-ragmask.ko.md) for the
+decomposition and the comparison against the paper's Table 11/12.
+
 Reproduce with:
 
 ```bash
-EMBEDDING_BACKEND=ollama PYTHONPATH=. .venv/bin/python scripts/measure_ragpart.py
+EMBEDDING_BACKEND=ollama PYTHONPATH=. .venv/bin/python scripts/measure_defenses.py
 ```
 
 The defense depends on the retriever. Run the same script with
