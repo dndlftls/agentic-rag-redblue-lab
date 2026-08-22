@@ -10,7 +10,7 @@ class HealthResponse(BaseModel):
     version: str
 
 
-RetrievalDefense = Literal["none", "ragpart"]
+RetrievalDefense = Literal["none", "ragpart", "ragmask"]
 
 
 class SearchRequest(BaseModel):
@@ -370,7 +370,7 @@ class PoisonedRAGBenchmarkRequest(BaseModel):
     retrieval_defenses: list[RetrievalDefense] = Field(
         default_factory=lambda: ["none"],
         min_length=1,
-        max_length=2,
+        max_length=3,
     )
 
     @model_validator(mode="after")
