@@ -7,6 +7,11 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from services.common.embeddings import DeterministicHashEmbeddings
+from services.common.cluster_filter import (
+    ClusterFilterConfig,
+    cluster,
+    redundant_indices,
+)
 from services.common.ragmask import (
     RagMaskConfig,
     assemble,
@@ -37,6 +42,7 @@ class ChromaDocumentStore:
         embedding: Embeddings | None = None,
         ragpart: RagPartConfig | None = None,
         ragmask: RagMaskConfig | None = None,
+        cluster_filter: ClusterFilterConfig | None = None,
     ) -> None:
         self.data_file = data_file
         self.embedding = embedding or DeterministicHashEmbeddings()
@@ -45,6 +51,9 @@ class ChromaDocumentStore:
         # ordinary search returns -- so it costs query time instead of
         # startup time and works on an existing collection.
         self.ragmask = ragmask or RagMaskConfig()
+        # The redundancy filter also needs no index; it compares candidates
+        # against each other rather than against the query.
+        self.cluster_filter = cluster_filter or ClusterFilterConfig()
         persist = str(persist_directory) if persist_directory is not None else None
         self.vector_store = Chroma(
             collection_name=collection_name,
@@ -285,6 +294,32 @@ class ChromaDocumentStore:
             hit.model_copy(update={"text": text, "score": round(score, 6)})
             for hit, text, score in ranked[:limit]
         ]
+
+    def search_cluster(self, query: str, limit: int) -> list[SearchHit]:
+        """Drop candidates that form a suspiciously tight cluster.
+
+        PoisonedRAG needs several near-duplicate poisons per query, so the
+        attack shows up as redundancy between candidates even when each one
+        looks individually plausible against the query. Clean documents in this
+        corpus never form such a group -- see services/common/cluster_filter.py
+        for the measurements behind the default threshold.
+
+        Falls back to the undefended ranking if every candidate is dropped, so
+        the filter can never empty a result set.
+        """
+        candidates = self.search(
+            query, candidate_count(limit, self.cluster_filter.overfetch)
+        )
+        if len(candidates) < self.cluster_filter.min_cluster_size:
+            return candidates[:limit]
+
+        vectors = self.embedding.embed_documents([hit.text for hit in candidates])
+        groups = cluster(vectors, self.cluster_filter.similarity_threshold)
+        dropped = redundant_indices(groups, self.cluster_filter.min_cluster_size)
+        kept = [
+            hit for index, hit in enumerate(candidates) if index not in dropped
+        ]
+        return (kept or candidates)[:limit]
 
     def search(self, query: str, limit: int) -> list[SearchHit]:
         results = self.vector_store.similarity_search_with_score(query, k=limit)

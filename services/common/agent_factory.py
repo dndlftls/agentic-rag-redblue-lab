@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from services.common.chroma_store import ChromaDocumentStore
 from services.common.embeddings import create_embeddings
+from services.common.cluster_filter import ClusterFilterConfig
 from services.common.ragmask import RagMaskConfig
 from services.common.ragpart import RagPartConfig
 from services.common.schemas import HealthResponse, SearchRequest, SearchResponse
@@ -39,6 +40,13 @@ def create_search_agent(
                 ),
                 enabled=os.getenv("RAGPART_ENABLED", "false").lower()
                 in {"1", "true", "yes"},
+            ),
+            cluster_filter=ClusterFilterConfig(
+                similarity_threshold=float(
+                    os.getenv("CLUSTER_SIMILARITY_THRESHOLD", "0.90")
+                ),
+                min_cluster_size=int(os.getenv("CLUSTER_MIN_SIZE", "2")),
+                overfetch=float(os.getenv("CLUSTER_OVERFETCH", "2")),
             ),
             ragmask=RagMaskConfig(
                 mask_length=int(os.getenv("RAGMASK_MASK_LENGTH", "15")),
@@ -84,6 +92,13 @@ def create_search_agent(
                     detail="RAGMask requires the Chroma backend.",
                 )
             hits = active_store.search_ragmask(request.query, request.limit)
+        elif request.defense == "cluster":
+            if not isinstance(active_store, ChromaDocumentStore):
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail="Cluster filtering requires the Chroma backend.",
+                )
+            hits = active_store.search_cluster(request.query, request.limit)
         else:
             hits = active_store.search(request.query, request.limit)
         return SearchResponse(

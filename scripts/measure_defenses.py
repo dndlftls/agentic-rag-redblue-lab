@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from services.common.chroma_store import ChromaDocumentStore
 from services.common.embeddings import create_embeddings
+from services.common.cluster_filter import ClusterFilterConfig
 from services.common.ragmask import RagMaskConfig
 from services.common.ragpart import RagPartConfig
 
@@ -103,13 +104,14 @@ POISON_TEMPLATE = (
 
 
 def build_store(work_file, scenarios, *, embedding, enabled, poisons,
-                ragmask=None, poison_texts=None):
+                ragmask=None, poison_texts=None, cluster_filter=None):
     store = ChromaDocumentStore(
         work_file,
         collection_name=f"defense-measure-{uuid4().hex[:8]}",
         embedding=embedding,
         ragpart=RagPartConfig(enabled=enabled),
         ragmask=ragmask or RagMaskConfig(),
+        cluster_filter=cluster_filter or ClusterFilterConfig(),
     )
     for scenario in scenarios:
         supplied = (poison_texts or {}).get(scenario["id"])
@@ -140,7 +142,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, nargs="+", default=[3, 5, 10])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--defenses", nargs="+", default=["none", "ragpart", "ragmask"]
+        "--defenses", nargs="+", default=["none", "ragpart", "ragmask", "cluster"]
     )
     parser.add_argument(
         "--delta-sweep", type=float, nargs="*", default=None,
@@ -222,6 +224,8 @@ def main() -> None:
                     hits = store.search_ragpart(scenario["query"], top_k)
                 elif defense == "ragmask":
                     hits = store.search_ragmask(scenario["query"], top_k)
+                elif defense == "cluster":
+                    hits = store.search_cluster(scenario["query"], top_k)
                 else:
                     hits = store.search(scenario["query"], top_k)
                 ids = [hit.document_id for hit in hits]
