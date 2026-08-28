@@ -58,8 +58,12 @@ AdvRAGgen이다. 이 중 Query-as-Poison은 문서에 질의문을 그대로 붙
 이 랩이 이미 구현한 PoisonedRAG 블랙박스 공격 `P = Q || I`와 **같은 공격**이다.
 
 논문은 paraphrase / perplexity 기반 방어가 이런 해석 가능한(interpretable)
-공격에는 무력함을 보인다. Query-as-Poison의 perplexity는 119로 무오염 문서의
-143과 구분되지 않는다.
+공격에는 무력함을 보인다(Table 1). perplexity 방어는 "값이 비정상적으로 높은
+문서"를 걸러내는데, Query-as-Poison은 **119로 무오염 문서 143보다 오히려
+낮다.** `I`를 LLM이 매끄럽게 써주기 때문에, 고유명사와 숫자가 섞인 실제 코퍼스
+문단보다 자연스럽다. 즉 임계값의 반대편에 있어서 잡히지 않는다(AdvRAGgen은
+74로 더 낮다). 반면 HotFlip은 989~1827로 쉽게 걸린다 — 다만 Multilingual E5
+에서는 113까지 내려가 이 역시 빠져나간다.
 
 ## 이 랩에 적용할 때의 판단
 
