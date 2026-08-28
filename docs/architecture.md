@@ -34,15 +34,28 @@ memory that defended mode drops like any other untrusted hit. This makes
 memory persistence of an attack measurable with the existing evaluation code.
 Experiment endpoints default to `use_memory=false` so trials stay independent.
 
-## Retrieval-stage defense
+## Retrieval-stage defenses
+
+Both defenses from arXiv:2512.24268 run before generation and use no trust
+metadata, so either composes with either `mode`.
 
 `retrieval_defense: "ragpart"` switches the search agents to a second Chroma
 collection holding `C(N, k)` mean-pooled fragment vectors per document. Each
 combination is queried independently and the resulting top-p lists are merged
-by majority vote (arXiv:2512.24268). It runs before generation and uses no
-trust metadata, so it composes with either `mode`. See
-`docs/ragpart-ragmask.ko.md` for the algorithm, measurements, and its current
-limitation under the offline hash embedding.
+by majority vote. Building that side index costs `N` embedding calls per
+document, so it is gated behind `RAGPART_ENABLED`.
+
+`retrieval_defense: "ragmask"` instead sanitises what an ordinary search
+already returned. The top `alpha*p` candidates are split into
+`RAGMASK_MASK_LENGTH`-token segments; each segment is masked in turn and a
+segment whose removal costs at least `RAGMASK_DELTA` of query similarity is
+dropped, because that is what a retrieval-boosting poison does. The surviving
+text is re-embedded and re-ranked down to the top p. It needs no side index, so
+it costs query time rather than startup time and works on an existing
+collection.
+
+See `docs/ragpart-ragmask.ko.md` for the algorithms, the measurements, and the
+dependence of both defenses on the retriever.
 
 ## Trust boundary
 

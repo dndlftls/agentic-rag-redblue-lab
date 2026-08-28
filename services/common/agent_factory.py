@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from services.common.chroma_store import ChromaDocumentStore
 from services.common.embeddings import create_embeddings
+from services.common.ragmask import RagMaskConfig
 from services.common.ragpart import RagPartConfig
 from services.common.schemas import HealthResponse, SearchRequest, SearchResponse
 from services.common.search import JsonDocumentStore
@@ -39,6 +40,11 @@ def create_search_agent(
                 enabled=os.getenv("RAGPART_ENABLED", "false").lower()
                 in {"1", "true", "yes"},
             ),
+            ragmask=RagMaskConfig(
+                mask_length=int(os.getenv("RAGMASK_MASK_LENGTH", "15")),
+                delta=float(os.getenv("RAGMASK_DELTA", "0.05")),
+                overfetch=float(os.getenv("RAGMASK_OVERFETCH", "2")),
+            ),
         )
     else:
         raise ValueError(f"Unsupported SEARCH_BACKEND: {search_backend}")
@@ -71,6 +77,13 @@ def create_search_agent(
                     status_code=status.HTTP_501_NOT_IMPLEMENTED,
                     detail=str(exc),
                 ) from exc
+        elif request.defense == "ragmask":
+            if not isinstance(active_store, ChromaDocumentStore):
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail="RAGMask requires the Chroma backend.",
+                )
+            hits = active_store.search_ragmask(request.query, request.limit)
         else:
             hits = active_store.search(request.query, request.limit)
         return SearchResponse(
