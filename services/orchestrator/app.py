@@ -69,6 +69,11 @@ from services.orchestrator.poisoned_rag import (
     generate_poison_set,
     select_diverse_candidates,
 )
+from services.orchestrator.robust_rag import (
+    RobustRagConfig,
+    aggregate,
+    isolate,
+)
 from services.orchestrator.rag import (
     build_rag_chain,
     collect_context_hits,
@@ -84,6 +89,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
 RAG_CONTEXT_LIMIT = int(os.getenv("RAG_CONTEXT_LIMIT", "6"))
+ROBUSTRAG_GROUP_SIZE = int(os.getenv("ROBUSTRAG_GROUP_SIZE", "1"))
 AGENT_URLS = {
     "local_db": os.getenv("LOCAL_DB_AGENT_URL", "http://localhost:8001"),
     "gmail": os.getenv("GMAIL_AGENT_URL", "http://localhost:8002"),
@@ -403,13 +409,32 @@ async def _generate_answer(
         }
 
     chain = build_rag_chain(_rag_model(), mode=request.mode)
+    conflict = False
     try:
-        generated_answer = await chain.ainvoke(
-            {
-                "question": request.query,
-                "context": format_context(context_hits),
-            }
-        )
+        if request.generation_defense == "robustrag":
+            # Isolate-then-aggregate: answer each group alone so an injected
+            # passage can influence only its own response, then refuse to
+            # assert anything when the isolated answers disagree.
+            groups = isolate(
+                context_hits,
+                RobustRagConfig(group_size=ROBUSTRAG_GROUP_SIZE).group_size,
+            )
+            isolated = [
+                await chain.ainvoke(
+                    {"question": request.query, "context": format_context(group)}
+                )
+                for group in groups
+            ]
+            result = aggregate(isolated)
+            generated_answer = result.answer
+            conflict = result.conflict
+        else:
+            generated_answer = await chain.ainvoke(
+                {
+                    "question": request.query,
+                    "context": format_context(context_hits),
+                }
+            )
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -437,6 +462,8 @@ async def _generate_answer(
         "documents": [hit.model_dump() for hit in context_hits],
         "results": results,
         "memory": [hit.model_dump() for hit in memory_hits],
+        "generation_defense": request.generation_defense,
+        "conflict_detected": conflict,
     }
 
 

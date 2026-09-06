@@ -11,6 +11,7 @@ class HealthResponse(BaseModel):
 
 
 RetrievalDefense = Literal["none", "ragpart", "ragmask", "cluster"]
+GenerationDefense = Literal["none", "robustrag"]
 
 
 class SearchRequest(BaseModel):
@@ -49,6 +50,9 @@ class OrchestratorAnswerRequest(OrchestratorQueryRequest):
         default=None,
         max_length=20,
     )
+    # Generation-stage defense. Orthogonal to `mode` (a trust filter) and to
+    # `retrieval_defense` (which runs in the search agents).
+    generation_defense: GenerationDefense = "none"
     # No shared default: a caller that omits session_id gets a fresh,
     # unique one instead of landing in the same memory bucket as every
     # other caller that also omitted it (that previously meant unrelated
