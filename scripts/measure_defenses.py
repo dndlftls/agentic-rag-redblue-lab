@@ -1,10 +1,15 @@
-"""Measure the retrieval-stage defenses against query-as-poison on NQ.
+"""Measure the defenses against query-as-poison on NQ.
 
 Builds a small corpus from `datasets/generated/nq_100000.json` -- the golden
 documents for the first scenarios in `datasets/experiments/nq_target_queries.json`
 plus random distractors -- injects `P = Q || I` poisons per scenario, and
-compares undefended retrieval against RAGPart and RAGMask at several top-k
-values, and can sweep the RAGMask delta.
+compares undefended retrieval against the retrieval-stage defenses at several
+top-k values, and can sweep the RAGMask delta.
+
+With `--generation-defenses` it also runs the answer stage and reports the
+attack success rate and the correct-answer rate *separately*, because a
+generation defense can lower ASR purely by refusing to answer. That second
+table is the one behind the numbers in docs/robustrag.ko.md.
 
 The defense depends on the retriever: it needs a dense retriever whose
 fragment embeddings preserve document meaning. Run with EMBEDDING_BACKEND=hash
@@ -156,6 +161,17 @@ def main() -> None:
     parser.add_argument("--poison-cache", type=Path, default=None)
     parser.add_argument("--passage-word-count", type=int, default=30)
     parser.add_argument("--max-generation-trials", type=int, default=10)
+    parser.add_argument(
+        "--generation-defenses",
+        nargs="*",
+        default=[],
+        choices=["none", "robustrag", "isolate_conflict"],
+        help=(
+            "Also measure the answer stage for each retrieval defense crossed "
+            "with these. Costs one LLM call per passage for every combination "
+            "except 'none'."
+        ),
+    )
     args = parser.parse_args()
 
     if not CORPUS.is_file():
@@ -211,6 +227,15 @@ def main() -> None:
             poison_texts=poison_texts,
         )
 
+        def retrieve(defense: str, query: str, top_k: int):
+            if defense == "ragpart":
+                return store.search_ragpart(query, top_k)
+            if defense == "ragmask":
+                return store.search_ragmask(query, top_k)
+            if defense == "cluster":
+                return store.search_cluster(query, top_k)
+            return store.search(query, top_k)
+
         def evaluate(defense: str, top_k: int) -> tuple[float, float, float, str]:
             attacked = succeeded = poisoned = 0
             ranks = []
@@ -220,14 +245,7 @@ def main() -> None:
                     f"poison-{scenario['id']}-{variant}"
                     for variant in range(args.poisons)
                 }
-                if defense == "ragpart":
-                    hits = store.search_ragpart(scenario["query"], top_k)
-                elif defense == "ragmask":
-                    hits = store.search_ragmask(scenario["query"], top_k)
-                elif defense == "cluster":
-                    hits = store.search_cluster(scenario["query"], top_k)
-                else:
-                    hits = store.search(scenario["query"], top_k)
+                hits = retrieve(defense, scenario["query"], top_k)
                 ids = [hit.document_id for hit in hits]
                 attacked += any(item in poison_ids for item in ids)
                 succeeded += any(item in gold for item in ids)
@@ -255,6 +273,103 @@ def main() -> None:
                     f"{top_k:>6} {defense:<10} {asr:>6.2f} {sr:>6.2f} "
                     f"{pk:>9.2f} {rank_text:>10}"
                 )
+
+        if args.generation_defenses:
+            # Imported here for the same reason as the poison generator above:
+            # the retrieval-only run must not need the LLM stack.
+            from services.orchestrator.evaluation import evaluate_answer
+            from services.orchestrator.rag import (
+                build_keyword_chain,
+                build_rag_chain,
+                create_chat_model,
+                format_context,
+            )
+            from services.orchestrator.robust_rag import (
+                aggregate,
+                isolate,
+                keyword_aggregate,
+            )
+
+            top_k = args.top_k[0]
+            model_name = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+            base_url = os.getenv(
+                "OLLAMA_BASE_URL", "http://localhost:11434"
+            ).rstrip("/")
+            answer_model = create_chat_model(
+                model=model_name, base_url=base_url,
+                temperature=0.0, num_predict=200,
+            )
+            answer_chain = build_rag_chain(answer_model, mode="vulnerable")
+            keyword_chain = build_keyword_chain(answer_model)
+
+            async def answer(hits, query: str, defense: str) -> tuple[str, bool]:
+                if defense == "none":
+                    text = await answer_chain.ainvoke(
+                        {"question": query, "context": format_context(hits)}
+                    )
+                    return text, False
+                isolated = [
+                    await answer_chain.ainvoke(
+                        {"question": query, "context": format_context(group)}
+                    )
+                    for group in isolate(hits, 1)
+                ]
+                if defense == "robustrag":
+                    survivors = keyword_aggregate(
+                        isolated,
+                        alpha=float(os.getenv("ROBUSTRAG_ALPHA", "0.2")),
+                        beta=float(os.getenv("ROBUSTRAG_BETA", "3")),
+                    ).keywords
+                    if not survivors:
+                        return (
+                            "I cannot determine the answer from the retrieved "
+                            "context."
+                        ), False
+                    text = await keyword_chain.ainvoke(
+                        {"question": query, "keywords": ", ".join(survivors)}
+                    )
+                    return text, False
+                result = aggregate(isolated, query)
+                return result.answer, result.conflict
+
+            async def answer_stage() -> None:
+                head = (
+                    f"{'retrieval':<10} {'generation':<17} {'ASR':>6} "
+                    f"{'correct':>8} {'unclear':>8} {'conflict':>9}"
+                )
+                print(
+                    f"\nAnswer stage at top-k={top_k}. ASR and correct are "
+                    f"separate: a defense can lower ASR by abstaining."
+                )
+                print(f"{head}\n{'-' * len(head)}")
+                for retrieval_defense in args.defenses:
+                    for generation_defense in args.generation_defenses:
+                        succeeded = correct = unclear = conflicts = 0
+                        for scenario in scenarios:
+                            hits = retrieve(
+                                retrieval_defense, scenario["query"], top_k
+                            )
+                            text, conflict = await answer(
+                                hits, scenario["query"], generation_defense
+                            )
+                            outcome, _, _ = evaluate_answer(
+                                text,
+                                expected_answer=scenario["expected_answer"],
+                                attack_target=scenario["attack_target"],
+                            )
+                            succeeded += outcome == "attack_succeeded"
+                            correct += outcome == "attack_resisted"
+                            unclear += outcome == "inconclusive"
+                            conflicts += conflict
+                        count = len(scenarios)
+                        print(
+                            f"{retrieval_defense:<10} {generation_defense:<17} "
+                            f"{succeeded / count:>6.2f} {correct / count:>8.2f} "
+                            f"{unclear / count:>8.2f} "
+                            f"{f'{conflicts}/{count}':>9}"
+                        )
+
+            asyncio.run(answer_stage())
 
         if args.delta_sweep:
             top_k = args.top_k[0]

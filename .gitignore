@@ -225,6 +225,10 @@ datasets/raw/*
 # Full 2.68M-document BEIR NQ corpus: ~1.6GB, over GitHub's 100MB file limit.
 # Deployed out-of-band; see AGENT_POISON_CORPUS_FILE / DATA_FILE overrides.
 datasets/generated/nq_2681468.json
+# Corpus slices the measurement scripts write and delete around a run. A
+# crashed or interrupted run leaves one behind, and `git add -A` has committed
+# them three times now.
+datasets/generated/_*.json
 data/
 models/
 .huggingface/
