@@ -98,6 +98,15 @@ services:
       OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
       OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
       RAG_CONTEXT_LIMIT: ${RAG_CONTEXT_LIMIT:-6}
+      # Defense switches. DEFENSES_ENABLED=false forces every defense off no
+      # matter what a request asks for; the DEFAULT_* values apply to requests
+      # that omit the field. Per-request fields still override the defaults.
+      DEFENSES_ENABLED: ${DEFENSES_ENABLED:-true}
+      DEFAULT_RETRIEVAL_DEFENSE: ${DEFAULT_RETRIEVAL_DEFENSE:-none}
+      DEFAULT_GENERATION_DEFENSE: ${DEFAULT_GENERATION_DEFENSE:-none}
+      ROBUSTRAG_GROUP_SIZE: ${ROBUSTRAG_GROUP_SIZE:-1}
+      ROBUSTRAG_ALPHA: ${ROBUSTRAG_ALPHA:-0.2}
+      ROBUSTRAG_BETA: ${ROBUSTRAG_BETA:-3}
       EXPERIMENT_RESULTS_DIR: /app/data/experiments
       EXPERIMENT_SCENARIOS_FILE: /app/datasets/experiments/nq_target_queries.json
       AGENT_MEMORY_FILE: /app/data/memory/memory.jsonl

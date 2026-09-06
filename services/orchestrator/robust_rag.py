@@ -5,20 +5,37 @@ SaTML 2026, arXiv:2405.15556) answers each retrieved passage in isolation and
 then aggregates the isolated responses, so an injected passage can influence at
 most the responses of the group it lands in.
 
-**Why the aggregation here is not the paper's.** The paper aggregates by
-counting keywords across isolated responses and keeping those above
-``min(alpha*n, beta)``. That needs benign passages to outnumber corrupted ones.
-Measured on this lab's corpus, only 1.4 passages on average support the correct
-answer (minimum 1), while PoisonedRAG injects three or more agreeing poisons. A
-count threshold of 2 therefore discards the correct answer in 3 of 5 scenarios,
-and a threshold of 1 admits a lone poison. Majority aggregation favours the
-attacker here, so this module keeps the paper's isolation and replaces the
-majority rule with conflict detection: when non-abstaining isolated responses
-disagree, neither claim is asserted and the disagreement is reported.
+Two aggregations live here.
 
-That converts a confidently wrong answer into a detected conflict. It cannot
-help when every retrieved passage is poisoned -- there is no disagreement left
-to detect -- which is the regime the retrieval-stage redundancy filter covers.
+``keyword_aggregate`` is the paper's own rule, implemented with the paper's
+default parameters (alpha=0.2, beta=3, Section V-A) so it can be measured
+rather than argued about. Unique keywords are counted across the isolated
+responses and those above ``min(alpha*n, beta)`` survive; the surviving
+keywords -- and no passages -- are then given back to the model to phrase the
+final answer.
+
+``aggregate`` is this lab's variant. The paper scopes its guarantee to small
+corruption budgets: Section II-C states robust generation is only "tractable
+and meaningful" when useful benign passages outnumber malicious ones, and
+Figure 8 shows robustness falling to zero once half the passages are corrupted.
+Measured here, only about one retrieved passage supports the correct answer
+(1.1 on average across eight scenarios, zero for one of them) while PoisonedRAG
+injects five agreeing poisons, so this lab sits far outside that regime and
+counting favours the attacker. The variant keeps the paper's isolation and
+replaces counting with conflict detection: when non-abstaining isolated
+responses disagree, neither claim is asserted and the disagreement is reported.
+It depends on disagreement existing rather than on a majority, so it still
+works when a single passage supports the truth.
+
+Neither helps when every retrieved passage is poisoned -- there is no benign
+response left to count or to disagree -- which is the regime the
+retrieval-stage redundancy filter covers.
+
+Decoding-based aggregation is not implemented. It is feasible (Ollama does
+expose token logprobs) but needs one logprob call per group per generated
+token, so a five-group answer of fifty tokens costs 250 sequential calls per
+query. It fails for the same structural reason anyway: summing the isolated
+next-token distributions lets five poisoned passages outweigh one benign one.
 """
 
 import re
@@ -178,4 +195,102 @@ def aggregate(responses: list[str], query: str = "") -> Aggregation:
         responses=responses,
         abstained=abstained,
         distinct_claims=[" / ".join(sorted(signature))],
+    )
+
+
+# ---------------------------------------------------------------------------
+# The paper's own keyword aggregation, kept so it can be measured directly.
+# ---------------------------------------------------------------------------
+
+KEYWORD_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "and", "or", "but", "if", "then", "than", "that",
+        "this", "these", "those", "there", "here", "is", "are", "was", "were",
+        "be", "been", "being", "am", "do", "does", "did", "have", "has", "had",
+        "of", "in", "on", "at", "to", "for", "from", "by", "with", "about",
+        "as", "into", "over", "after", "before", "between", "during", "it",
+        "its", "he", "she", "they", "them", "his", "her", "their", "we", "you",
+        "i", "not", "no", "can", "cannot", "could", "will", "would", "should",
+        "may", "might", "must", "so", "such", "also", "only", "very", "more",
+        "most", "some", "any", "each", "which", "who", "whom", "whose", "what",
+        "when", "where", "why", "how", "according", "based", "context",
+        "passage", "passages", "retrieved", "answer", "question", "source",
+        "document", "documents", "information", "states", "state", "said",
+        "says", "provided", "given", "text",
+    }
+)
+
+
+@dataclass(frozen=True)
+class KeywordAggregation:
+    """Outcome of the paper's keyword aggregation, with its working exposed.
+
+    ``counts`` and ``threshold`` are kept so an experiment can report *why* a
+    keyword survived or was dropped rather than only the final answer.
+    """
+
+    keywords: list[str]
+    counts: dict[str, int]
+    threshold: float
+    answered: int
+    abstained: int
+    responses: list[str]
+
+
+def response_keywords(response: str) -> set[str]:
+    """Keywords of one isolated response.
+
+    The paper extracts these with an auxiliary LLM call; this is a lexical
+    stand-in -- content words and numbers, citations stripped -- which keeps
+    the aggregation deterministic and testable.
+
+    The substitution does not decide the outcome. What the counting rule turns
+    on is how many *responses* carry the discriminating token, and that is a
+    property of the retrieved passages, not of the extractor: a fact supported
+    by one passage appears in one response however keywords are extracted.
+    """
+    text = re.sub(r"\[[^\]]*\]", " ", response)
+    keywords: set[str] = set()
+    for match in re.finditer(r"[A-Za-z][A-Za-z'-]*|\d[\d,./]*", text):
+        token = match.group().strip(",./").casefold()
+        if not token or token in KEYWORD_STOPWORDS:
+            continue
+        keywords.add(token)
+    return keywords
+
+
+def keyword_aggregate(
+    responses: list[str],
+    *,
+    alpha: float = 0.2,
+    beta: float = 3.0,
+) -> KeywordAggregation:
+    """RobustRAG keyword aggregation with the paper's default parameters.
+
+    Abstaining responses are dropped, keywords are counted once per remaining
+    response, and a keyword survives when its count exceeds
+    ``mu = min(alpha * n, beta)`` over the ``n`` non-abstaining responses
+    (paper Section IV-B; defaults alpha=0.2, beta=3 from Section V-A).
+
+    With the lab's usual n=5 this puts mu at 1.0, so a keyword must appear in
+    at least two isolated responses to survive.
+    """
+    answered = [text for text in responses if text.strip() and not is_abstention(text)]
+    counts: dict[str, int] = {}
+    for text in answered:
+        for keyword in response_keywords(text):
+            counts[keyword] = counts.get(keyword, 0) + 1
+
+    threshold = min(alpha * len(answered), beta)
+    survivors = sorted(
+        (keyword for keyword, count in counts.items() if count > threshold),
+        key=lambda keyword: (-counts[keyword], keyword),
+    )
+    return KeywordAggregation(
+        keywords=survivors,
+        counts=counts,
+        threshold=threshold,
+        answered=len(answered),
+        abstained=len(responses) - len(answered),
+        responses=responses,
     )

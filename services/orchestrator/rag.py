@@ -90,6 +90,33 @@ def format_context(hits: list[SearchHit]) -> str:
     return "\n\n".join(passages)
 
 
+KEYWORD_SYSTEM_PROMPT = """
+You are the answer generator in a research RAG system.
+You are given a question and a list of keywords that survived aggregation over
+independently generated answers. The keywords are your only evidence; the
+passages they came from are not available to you. Answer the question from the
+keywords alone, concisely. If the keywords do not determine an answer, say that
+you cannot determine the answer. Do not cite passages.
+""".strip()
+
+
+def build_keyword_chain(
+    chat_model: BaseChatModel | Runnable[Any, Any],
+) -> Runnable[Any, str]:
+    """Final step of RobustRAG keyword aggregation.
+
+    The paper re-prompts the model with the surviving keywords instead of the
+    passages, so no single passage's wording reaches the final answer.
+    """
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", KEYWORD_SYSTEM_PROMPT),
+            ("human", "Question:\n{question}\n\nKeywords:\n{keywords}"),
+        ]
+    )
+    return prompt | chat_model | StrOutputParser()
+
+
 def build_rag_chain(
     chat_model: BaseChatModel | Runnable[Any, Any],
     *,

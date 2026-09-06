@@ -8,6 +8,8 @@ from services.orchestrator.robust_rag import (
     claims_agree,
     is_abstention,
     isolate,
+    keyword_aggregate,
+    response_keywords,
 )
 
 
@@ -194,7 +196,7 @@ def test_orchestrator_isolates_and_reports_conflict(monkeypatch) -> None:
             "query": "who recorded the song",
             "sources": ["local_db"],
             "limit": 2,
-            "generation_defense": "robustrag",
+            "generation_defense": "isolate_conflict",
             "use_memory": False,
         },
     )
@@ -241,3 +243,57 @@ def test_orchestrator_default_keeps_single_call(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["conflict_detected"] is False
     assert len(calls) == 1, "the undefended path must stay a single call"
+
+
+# --- the paper's own keyword aggregation ---------------------------------
+
+
+def test_keyword_threshold_follows_the_paper_formula() -> None:
+    # mu = min(alpha*n, beta) = min(0.2*5, 3) = 1.0 with five answered.
+    result = keyword_aggregate(["alpha"] * 5)
+    assert result.answered == 5
+    assert result.threshold == pytest.approx(1.0)
+
+
+def test_keyword_threshold_saturates_at_beta() -> None:
+    # With enough responses alpha*n exceeds beta and beta caps the threshold.
+    result = keyword_aggregate(["alpha"] * 40)
+    assert result.threshold == pytest.approx(3.0)
+
+
+def test_abstentions_are_excluded_from_the_count() -> None:
+    result = keyword_aggregate(
+        [
+            "The album sold 24 copies.",
+            "The context does not contain that information.",
+        ]
+    )
+    assert result.answered == 1
+    assert result.abstained == 1
+
+
+def test_keyword_aggregation_drops_a_singly_supported_truth() -> None:
+    """The measured failure mode, encoded as a test.
+
+    Four poisoned passages agree on 24 and one benign passage says 23. The
+    paper's threshold keeps the majority token and discards the minority one,
+    so the aggregation hands the attacker's claim to the final prompt. This is
+    the paper's own rule at the paper's own defaults, not a weakened version.
+    """
+    result = keyword_aggregate(
+        ["Season 4 has 24 episodes."] * 4 + ["Season 4 has 23 episodes."]
+    )
+    assert "24" in result.keywords
+    assert "23" not in result.keywords
+
+
+def test_unanimous_benign_answers_survive_aggregation() -> None:
+    result = keyword_aggregate(["The capital is Paris."] * 4)
+    assert "paris" in result.keywords
+
+
+def test_keywords_ignore_citations_and_stopwords() -> None:
+    keywords = response_keywords("The answer is Paris [beir-nq-sample:nq-001].")
+    assert "paris" in keywords
+    assert "the" not in keywords
+    assert "beir" not in keywords

@@ -73,8 +73,10 @@ from services.orchestrator.robust_rag import (
     RobustRagConfig,
     aggregate,
     isolate,
+    keyword_aggregate,
 )
 from services.orchestrator.rag import (
+    build_keyword_chain,
     build_rag_chain,
     collect_context_hits,
     create_chat_model,
@@ -90,6 +92,34 @@ OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
 RAG_CONTEXT_LIMIT = int(os.getenv("RAG_CONTEXT_LIMIT", "6"))
 ROBUSTRAG_GROUP_SIZE = int(os.getenv("ROBUSTRAG_GROUP_SIZE", "1"))
+# RobustRAG keyword-aggregation parameters, at the paper's defaults.
+ROBUSTRAG_ALPHA = float(os.getenv("ROBUSTRAG_ALPHA", "0.2"))
+ROBUSTRAG_BETA = float(os.getenv("ROBUSTRAG_BETA", "3"))
+
+
+def _flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Master switch. False forces every defense off no matter what a request asks
+# for, so a whole run can be taken back to the undefended baseline without
+# editing the callers. The per-request fields stay the fine-grained control:
+# omitted -> the DEFAULT_* deployment setting, "none" -> off for that request.
+DEFENSES_ENABLED = _flag("DEFENSES_ENABLED", "true")
+DEFAULT_RETRIEVAL_DEFENSE = os.getenv("DEFAULT_RETRIEVAL_DEFENSE", "none")
+DEFAULT_GENERATION_DEFENSE = os.getenv("DEFAULT_GENERATION_DEFENSE", "none")
+
+
+def resolve_retrieval_defense(requested: str | None) -> str:
+    if not DEFENSES_ENABLED:
+        return "none"
+    return DEFAULT_RETRIEVAL_DEFENSE if requested is None else requested
+
+
+def resolve_generation_defense(requested: str | None) -> str:
+    if not DEFENSES_ENABLED:
+        return "none"
+    return DEFAULT_GENERATION_DEFENSE if requested is None else requested
 AGENT_URLS = {
     "local_db": os.getenv("LOCAL_DB_AGENT_URL", "http://localhost:8001"),
     "gmail": os.getenv("GMAIL_AGENT_URL", "http://localhost:8002"),
@@ -323,7 +353,7 @@ async def _query_agents(
     payload = {
         "query": request.query,
         "limit": request.limit,
-        "defense": request.retrieval_defense,
+        "defense": resolve_retrieval_defense(request.retrieval_defense),
     }
 
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -408,13 +438,15 @@ async def _generate_answer(
             "memory": [],
         }
 
+    generation_defense = resolve_generation_defense(request.generation_defense)
     chain = build_rag_chain(_rag_model(), mode=request.mode)
     conflict = False
+    surviving_keywords: list[str] | None = None
     try:
-        if request.generation_defense == "robustrag":
-            # Isolate-then-aggregate: answer each group alone so an injected
-            # passage can influence only its own response, then refuse to
-            # assert anything when the isolated answers disagree.
+        if generation_defense in {"robustrag", "isolate_conflict"}:
+            # Both share the paper's isolation: answer each group alone so an
+            # injected passage can influence only its own response. They differ
+            # only in how the isolated responses are combined.
             groups = isolate(
                 context_hits,
                 RobustRagConfig(group_size=ROBUSTRAG_GROUP_SIZE).group_size,
@@ -425,9 +457,35 @@ async def _generate_answer(
                 )
                 for group in groups
             ]
-            result = aggregate(isolated, request.query)
-            generated_answer = result.answer
-            conflict = result.conflict
+            if generation_defense == "robustrag":
+                # The paper's rule: keep keywords appearing in more than
+                # min(alpha*n, beta) of the isolated responses, then answer
+                # from the surviving keywords alone.
+                keyword_result = keyword_aggregate(
+                    isolated,
+                    alpha=ROBUSTRAG_ALPHA,
+                    beta=ROBUSTRAG_BETA,
+                )
+                surviving_keywords = keyword_result.keywords
+                if surviving_keywords:
+                    generated_answer = await build_keyword_chain(
+                        _rag_model()
+                    ).ainvoke(
+                        {
+                            "question": request.query,
+                            "keywords": ", ".join(surviving_keywords),
+                        }
+                    )
+                else:
+                    generated_answer = (
+                        "I cannot determine the answer from the retrieved context."
+                    )
+            else:
+                # This lab's variant: refuse to assert anything when the
+                # isolated answers disagree, instead of counting them.
+                result = aggregate(isolated, request.query)
+                generated_answer = result.answer
+                conflict = result.conflict
         else:
             generated_answer = await chain.ainvoke(
                 {
@@ -462,8 +520,10 @@ async def _generate_answer(
         "documents": [hit.model_dump() for hit in context_hits],
         "results": results,
         "memory": [hit.model_dump() for hit in memory_hits],
-        "generation_defense": request.generation_defense,
+        "generation_defense": generation_defense,
+        "retrieval_defense": resolve_retrieval_defense(request.retrieval_defense),
         "conflict_detected": conflict,
+        "surviving_keywords": surviving_keywords,
     }
 
 

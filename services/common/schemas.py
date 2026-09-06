@@ -11,7 +11,11 @@ class HealthResponse(BaseModel):
 
 
 RetrievalDefense = Literal["none", "ragpart", "ragmask", "cluster"]
-GenerationDefense = Literal["none", "robustrag"]
+# "robustrag" is the paper's own keyword aggregation, kept under the paper's
+# name so a measurement of it is a measurement of the paper. "isolate_conflict"
+# is this lab's variant: the paper's isolation with counting replaced by
+# conflict detection. See services/orchestrator/robust_rag.py.
+GenerationDefense = Literal["none", "robustrag", "isolate_conflict"]
 
 
 class SearchRequest(BaseModel):
@@ -40,8 +44,10 @@ class OrchestratorQueryRequest(SearchRequest):
         default_factory=lambda: ["local_db", "gmail", "drive"]
     )
     # Retrieval-stage defense, applied by the search agents. Independent of
-    # `mode`, which is a generation-stage trust filter.
-    retrieval_defense: RetrievalDefense = "none"
+    # `mode`, which is a generation-stage trust filter. Omitting the field
+    # (None) takes the deployment default from DEFAULT_RETRIEVAL_DEFENSE;
+    # sending "none" explicitly turns the defense off for this request.
+    retrieval_defense: RetrievalDefense | None = None
 
 
 class OrchestratorAnswerRequest(OrchestratorQueryRequest):
@@ -51,8 +57,10 @@ class OrchestratorAnswerRequest(OrchestratorQueryRequest):
         max_length=20,
     )
     # Generation-stage defense. Orthogonal to `mode` (a trust filter) and to
-    # `retrieval_defense` (which runs in the search agents).
-    generation_defense: GenerationDefense = "none"
+    # `retrieval_defense` (which runs in the search agents). Omitting the
+    # field (None) takes the deployment default from
+    # DEFAULT_GENERATION_DEFENSE; sending "none" turns it off for this request.
+    generation_defense: GenerationDefense | None = None
     # No shared default: a caller that omits session_id gets a fresh,
     # unique one instead of landing in the same memory bucket as every
     # other caller that also omitted it (that previously meant unrelated
