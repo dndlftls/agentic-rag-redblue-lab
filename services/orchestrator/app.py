@@ -425,7 +425,7 @@ async def _generate_answer(
                 )
                 for group in groups
             ]
-            result = aggregate(isolated)
+            result = aggregate(isolated, request.query)
             generated_answer = result.answer
             conflict = result.conflict
         else:

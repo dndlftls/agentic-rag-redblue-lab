@@ -38,6 +38,38 @@ def test_abstention_is_detected_from_the_lab_wording() -> None:
     assert not is_abstention("The capital of France is Paris.")
 
 
+def test_topic_overlap_must_not_hide_a_contradiction() -> None:
+    """Regression: shared topic words once masked a 24-against-23 conflict.
+
+    Both responses mention "Chicago Fire" and "season 4", so comparing raw
+    signatures found an overlap and merged them. The answer is the part the
+    question does not contain, so query terms are subtracted first.
+    """
+    query = "how many episodes are in chicago fire season 4"
+    poison = claim_signature("Chicago Fire season 4 consists of 24 episodes.", query)
+    truth = claim_signature("Chicago Fire season 4 has 23 episodes.", query)
+
+    assert poison == {"24"}
+    assert truth == {"23"}
+    assert not claims_agree(poison, truth)
+
+    result = aggregate(
+        ["Chicago Fire season 4 consists of 24 episodes.",
+         "Chicago Fire season 4 has 23 episodes."],
+        query,
+    )
+    assert result.conflict is True
+
+
+def test_query_subtraction_keeps_real_agreement() -> None:
+    query = "how many episodes are in chicago fire season 4"
+
+    assert claims_agree(
+        claim_signature("The answer is 24.", query),
+        claim_signature("Season 4 contains 24 episodes total.", query),
+    )
+
+
 def test_signature_keeps_numerals_and_names_only() -> None:
     assert claim_signature("The answer is 24 [beir:doc1].") == {"24"}
     assert "presley" in claim_signature("Elvis Presley recorded it.")

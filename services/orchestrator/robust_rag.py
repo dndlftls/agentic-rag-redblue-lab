@@ -83,8 +83,8 @@ GENERIC_CAPITALS = {
 }
 
 
-def claim_signature(response: str) -> set[str]:
-    """Salient content of a response: numerals and proper nouns.
+def claim_signature(response: str, query: str = "") -> set[str]:
+    """What a response asserts: salient content that is not already in the question.
 
     The paper extracts keywords to compare isolated responses; short factual
     answers in this lab differ on exactly these tokens ("24" against "23",
@@ -94,7 +94,18 @@ def claim_signature(response: str) -> set[str]:
 
     Capitalisation only counts away from a sentence start, so "The" in "The
     answer is 24" is not mistaken for a name.
+
+    Query terms are subtracted because the answer is the part the question does
+    not already contain. Without this, two responses that contradict each other
+    still share their topic words -- "Chicago Fire season 4 has 24 episodes"
+    against "... 23 episodes" overlap on `fire` and `4` -- and would be read as
+    agreeing. Removing the query leaves {24} against {23}, which is the
+    disagreement.
     """
+    query_terms = {
+        match.group().strip(",./").casefold()
+        for match in re.finditer(r"[A-Za-z][A-Za-z'-]*|\d[\d,./]*", query)
+    }
     text = re.sub(r"\[[^\]]*\]", " ", response)
     signature: set[str] = set()
     for match in re.finditer(r"[A-Za-z][A-Za-z'-]*|\d[\d,./]*", text):
@@ -109,7 +120,7 @@ def claim_signature(response: str) -> set[str]:
         if SENTENCE_START.search(text[: match.start()]):
             continue
         signature.add(token.casefold())
-    return signature
+    return signature - query_terms
 
 
 def claims_agree(left: set[str], right: set[str]) -> bool:
@@ -123,7 +134,7 @@ def claims_agree(left: set[str], right: set[str]) -> bool:
     return bool(left & right)
 
 
-def aggregate(responses: list[str]) -> Aggregation:
+def aggregate(responses: list[str], query: str = "") -> Aggregation:
     """Report a single claim only when the non-abstaining responses agree."""
     answered = [text for text in responses if text.strip() and not is_abstention(text)]
     abstained = len(responses) - len(answered)
@@ -139,7 +150,7 @@ def aggregate(responses: list[str]) -> Aggregation:
 
     groups: list[tuple[set[str], list[str]]] = []
     for text in answered:
-        signature = claim_signature(text)
+        signature = claim_signature(text, query)
         for existing, members in groups:
             if claims_agree(signature, existing):
                 existing |= signature
