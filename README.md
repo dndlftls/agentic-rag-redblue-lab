@@ -24,8 +24,10 @@ Orchestrator :8000 ---- Ollama / Qwen3:8b
 - `vulnerable` mode uses trusted and untrusted passages.
 - `defended` mode removes untrusted passages before answer generation.
 - The orchestrator keeps a persistent per-session long-term memory of turns.
-- `retrieval_defense: "ragpart"` and `"ragmask"` apply retrieval-stage defenses
-  that use no trust labels at all.
+- `retrieval_defense: "ragpart"`, `"ragmask"` and `"cluster"` apply
+  retrieval-stage defenses that use no trust labels at all.
+- `generation_defense: "robustrag"` and `"isolate_conflict"` apply
+  generation-stage defenses. Every defense can be switched off.
 
 Real Google credentials, private data, and complete research datasets are not
 included. Optional Drive and Gmail sync use local, Git-ignored credential files.
@@ -366,6 +368,61 @@ next baseline.
 
 Use `GET /agents` for search-agent health and `GET /model` for Ollama model
 readiness.
+
+## Generation-stage defenses
+
+Both answer each retrieved passage in isolation, so an injected passage can
+only corrupt its own response. They differ in how the isolated responses are
+combined.
+
+`generation_defense: "robustrag"` is RobustRAG's keyword aggregation
+(Xiang et al., SaTML 2026) at the paper's defaults: keywords appearing in more
+than `min(alpha * n, beta)` of the `n` non-abstaining responses survive, and
+the final answer is generated from the surviving keywords alone. `alpha` and
+`beta` are `ROBUSTRAG_ALPHA` and `ROBUSTRAG_BETA`.
+
+`generation_defense: "isolate_conflict"` keeps the isolation but replaces
+counting with conflict detection: when the non-abstaining responses disagree,
+no answer is asserted and the disagreement is reported. The paper scopes its
+guarantee to corpora where benign passages outnumber malicious ones, which is
+not this lab's regime; see `services/orchestrator/robust_rag.py` for the
+measurement behind that split.
+
+```bash
+curl -X POST http://localhost:8000/answer \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"What is the capital of France?",
+    "sources":["local_db"],
+    "generation_defense":"isolate_conflict"
+  }'
+```
+
+The response echoes the defenses that actually ran as `retrieval_defense` and
+`generation_defense`, plus `conflict_detected` and, for `robustrag`, the
+`surviving_keywords` the answer was built from.
+
+## Switching defenses on and off
+
+Three levels of control, narrowest first:
+
+1. **Per request.** `retrieval_defense` and `generation_defense` name a
+   defense for that one request; `"none"` turns it off for that request.
+2. **Per deployment.** `DEFAULT_RETRIEVAL_DEFENSE` and
+   `DEFAULT_GENERATION_DEFENSE` apply to requests that omit the field, so a
+   stack can be brought up defended without changing any caller.
+3. **Master switch.** `DEFENSES_ENABLED=false` forces every defense off no
+   matter what a request asks for, which returns a whole run to the undefended
+   baseline in one variable.
+
+```bash
+DEFENSES_ENABLED=false docker compose up -d orchestrator
+DEFAULT_GENERATION_DEFENSE=isolate_conflict docker compose up -d orchestrator
+```
+
+RAGPart additionally needs its second index built at index time
+(`RAGPART_ENABLED=true` on the search agents), so requesting it against a
+collection indexed without it returns 501 rather than silently falling back.
 
 ## Google Drive folder sync
 

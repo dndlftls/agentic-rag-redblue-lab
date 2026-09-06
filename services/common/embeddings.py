@@ -1,3 +1,4 @@
+import logging
 import os
 import math
 from hashlib import blake2b
@@ -35,8 +36,20 @@ class DeterministicHashEmbeddings(Embeddings):
         return self._embed(text)
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def create_embeddings() -> Embeddings:
+    """Build the embedding named by EMBEDDING_BACKEND.
+
+    The chosen backend is logged because the default is the hash embedding,
+    which is right for tests and wrong for any measurement: a harness that
+    forgets to set EMBEDDING_BACKEND=ollama otherwise produces plausible
+    numbers for a retriever nobody deploys. The log line is the record of
+    which retriever a given run actually used.
+    """
     backend = os.getenv("EMBEDDING_BACKEND", "deterministic").strip().lower()
+    LOGGER.info("embedding backend: %s", backend)
     if backend == "deterministic":
         return DeterministicHashEmbeddings(
             dimensions=int(os.getenv("HASH_EMBEDDING_DIMENSIONS", "256"))
