@@ -371,7 +371,7 @@ readiness.
 
 ## Generation-stage defenses
 
-Both answer each retrieved passage in isolation, so an injected passage can
+All three answer each retrieved passage in isolation, so an injected passage can
 only corrupt its own response. They differ in how the isolated responses are
 combined.
 
@@ -381,12 +381,18 @@ than `min(alpha * n, beta)` of the `n` non-abstaining responses survive, and
 the final answer is generated from the surviving keywords alone. `alpha` and
 `beta` are `ROBUSTRAG_ALPHA` and `ROBUSTRAG_BETA`.
 
-`generation_defense: "isolate_conflict"` keeps the isolation but replaces
-counting with conflict detection: when the non-abstaining responses disagree,
-no answer is asserted and the disagreement is reported. The paper scopes its
-guarantee to corpora where benign passages outnumber malicious ones, which is
-not this lab's regime; see `services/orchestrator/robust_rag.py` for the
-measurement behind that split.
+`generation_defense: "isolation"` applies the isolation and nothing else,
+answering from the longest non-abstaining response. An ablation behind the
+redundancy filter measured this as the best of the three: correct 0.75 against
+0.50 for answering all passages jointly. The gain is isolation's own -- one
+passage per call leaves the model less to be distracted by.
+
+`generation_defense: "isolate_conflict"` adds conflict detection on top of the
+isolation: when the non-abstaining responses disagree, no answer is asserted.
+It is kept because it is measured, not because it is recommended -- it scores
+below plain isolation (0.62), since the rule can only ever withhold an answer,
+and worse than no defense at all when every retrieved passage is poisoned. See
+`docs/robustrag.ko.md`.
 
 ```bash
 curl -X POST http://localhost:8000/answer \

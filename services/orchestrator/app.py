@@ -73,6 +73,7 @@ from services.orchestrator.robust_rag import (
     RobustRagConfig,
     aggregate,
     isolate,
+    isolation_only,
     keyword_aggregate,
 )
 from services.orchestrator.rag import (
@@ -443,8 +444,8 @@ async def _generate_answer(
     conflict = False
     surviving_keywords: list[str] | None = None
     try:
-        if generation_defense in {"robustrag", "isolate_conflict"}:
-            # Both share the paper's isolation: answer each group alone so an
+        if generation_defense in {"robustrag", "isolation", "isolate_conflict"}:
+            # All three share the paper's isolation: answer each group alone so an
             # injected passage can influence only its own response. They differ
             # only in how the isolated responses are combined.
             groups = isolate(
@@ -480,9 +481,16 @@ async def _generate_answer(
                     generated_answer = (
                         "I cannot determine the answer from the retrieved context."
                     )
+            elif generation_defense == "isolation":
+                # Isolation with no aggregation rule. Measured as the best of
+                # the three; the gain is isolation's, not any combining rule's.
+                generated_answer = isolation_only(isolated).answer
             else:
                 # This lab's variant: refuse to assert anything when the
-                # isolated answers disagree, instead of counting them.
+                # isolated answers disagree, instead of counting them. An
+                # ablation behind the redundancy filter measured this *below*
+                # plain isolation -- the conflict rule can only withhold an
+                # answer, and the one time it fired it withheld a correct one.
                 result = aggregate(isolated, request.query)
                 generated_answer = result.answer
                 conflict = result.conflict

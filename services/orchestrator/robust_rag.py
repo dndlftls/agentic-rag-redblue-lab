@@ -294,3 +294,35 @@ def keyword_aggregate(
         abstained=len(responses) - len(answered),
         responses=responses,
     )
+
+
+def isolation_only(responses: list[str]) -> Aggregation:
+    """Isolation with no aggregation rule: the longest non-abstaining response.
+
+    This is the paper's isolation stripped of every combination rule, and an
+    ablation behind the redundancy filter measured it as the best of the three
+    generation-stage options (correct 0.75, against 0.50 for answering all
+    passages jointly and 0.62 for ``aggregate``). The gain over answering
+    jointly comes from isolation itself -- one passage per call leaves the
+    model less to be distracted by -- not from anything that inspects the
+    responses afterwards.
+
+    Keeping it as its own defense makes that attribution testable rather than
+    hidden inside a variant that also does something else.
+    """
+    answered = [text for text in responses if text.strip() and not is_abstention(text)]
+    if not answered:
+        return Aggregation(
+            answer="I cannot determine the answer from the retrieved context.",
+            conflict=False,
+            responses=responses,
+            abstained=len(responses),
+            distinct_claims=[],
+        )
+    return Aggregation(
+        answer=max(answered, key=len).strip(),
+        conflict=False,
+        responses=responses,
+        abstained=len(responses) - len(answered),
+        distinct_claims=[],
+    )

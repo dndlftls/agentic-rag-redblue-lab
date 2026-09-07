@@ -8,6 +8,7 @@ from services.orchestrator.robust_rag import (
     claims_agree,
     is_abstention,
     isolate,
+    isolation_only,
     keyword_aggregate,
     response_keywords,
 )
@@ -297,3 +298,43 @@ def test_keywords_ignore_citations_and_stopwords() -> None:
     assert "paris" in keywords
     assert "the" not in keywords
     assert "beir" not in keywords
+
+
+# --- isolation with no aggregation rule ----------------------------------
+
+
+def test_isolation_only_takes_the_longest_answered_response() -> None:
+    result = isolation_only(
+        ["24.", "Season 4 has 24 episodes according to the network."]
+    )
+    assert result.answer.startswith("Season 4")
+    assert result.conflict is False
+
+
+def test_isolation_only_skips_abstentions() -> None:
+    result = isolation_only(
+        [
+            "The retrieved context does not contain that information at all.",
+            "Paris.",
+        ]
+    )
+    assert result.answer == "Paris."
+    assert result.abstained == 1
+
+
+def test_isolation_only_abstains_when_every_response_abstains() -> None:
+    result = isolation_only(["I cannot determine the answer."] * 3)
+    assert "cannot determine" in result.answer
+    assert result.abstained == 3
+
+
+def test_isolation_only_never_reports_conflict() -> None:
+    """The point of this arm: it has no rule that can withhold an answer.
+
+    ``aggregate`` on the same disagreeing responses reports a conflict and
+    asserts nothing. Measured behind the redundancy filter, that cost a
+    correct answer, so the two behaviours are kept separately testable.
+    """
+    disagreeing = ["Season 4 has 24 episodes.", "Season 4 has 23 episodes."]
+    assert aggregate(disagreeing, "how many episodes in season 4").conflict is True
+    assert isolation_only(disagreeing).conflict is False

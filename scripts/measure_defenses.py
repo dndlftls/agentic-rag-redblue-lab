@@ -165,7 +165,7 @@ def main() -> None:
         "--generation-defenses",
         nargs="*",
         default=[],
-        choices=["none", "robustrag", "isolate_conflict"],
+        choices=["none", "robustrag", "isolation", "isolate_conflict"],
         help=(
             "Also measure the answer stage for each retrieval defense crossed "
             "with these. Costs one LLM call per passage for every combination "
@@ -287,6 +287,7 @@ def main() -> None:
             from services.orchestrator.robust_rag import (
                 aggregate,
                 isolate,
+                isolation_only,
                 keyword_aggregate,
             )
 
@@ -329,6 +330,8 @@ def main() -> None:
                         {"question": query, "keywords": ", ".join(survivors)}
                     )
                     return text, False
+                if defense == "isolation":
+                    return isolation_only(isolated).answer, False
                 result = aggregate(isolated, query)
                 return result.answer, result.conflict
 

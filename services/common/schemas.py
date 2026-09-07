@@ -12,10 +12,14 @@ class HealthResponse(BaseModel):
 
 RetrievalDefense = Literal["none", "ragpart", "ragmask", "cluster"]
 # "robustrag" is the paper's own keyword aggregation, kept under the paper's
-# name so a measurement of it is a measurement of the paper. "isolate_conflict"
-# is this lab's variant: the paper's isolation with counting replaced by
-# conflict detection. See services/orchestrator/robust_rag.py.
-GenerationDefense = Literal["none", "robustrag", "isolate_conflict"]
+# name so a measurement of it is a measurement of the paper. "isolation" is the
+# paper's isolation with no aggregation rule at all -- measured here as the
+# best generation-stage option. "isolate_conflict" is this lab's variant, which
+# adds conflict detection on top of isolation and measures *worse* than
+# isolation alone. See services/orchestrator/robust_rag.py.
+GenerationDefense = Literal[
+    "none", "robustrag", "isolation", "isolate_conflict"
+]
 
 
 class SearchRequest(BaseModel):
