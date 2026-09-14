@@ -240,9 +240,14 @@ class KeywordAggregation:
 def response_keywords(response: str) -> set[str]:
     """Keywords of one isolated response.
 
-    The paper extracts these with an auxiliary LLM call; this is a lexical
-    stand-in -- content words and numbers, citations stripped -- which keeps
-    the aggregation deterministic and testable.
+    The paper extracts keywords and keyphrases from the text between adjacent
+    uninformative words (Appendix B); the official code does this with spaCy
+    part-of-speech tagging, keeping lemmatised noun-phrase chunks, their
+    individual lemmas, and the whole response string. This is a lexical
+    stand-in -- single casefolded content words and numbers, citations
+    stripped -- chosen to avoid a spaCy dependency. It is not a reproduction
+    of the official extractor: it produces no multi-word phrases and no
+    lemmas, so "Frank Sinatra" counts as two tokens rather than one phrase.
 
     The substitution does not decide the outcome. What the counting rule turns
     on is how many *responses* carry the discriminating token, and that is a
@@ -265,15 +270,26 @@ def keyword_aggregate(
     alpha: float = 0.2,
     beta: float = 3.0,
 ) -> KeywordAggregation:
-    """RobustRAG keyword aggregation with the paper's default parameters.
+    """RobustRAG keyword aggregation with the paper's short-answer QA parameters.
 
     Abstaining responses are dropped, keywords are counted once per remaining
-    response, and a keyword survives when its count exceeds
-    ``mu = min(alpha * n, beta)`` over the ``n`` non-abstaining responses
-    (paper Section IV-B; defaults alpha=0.2, beta=3 from Section V-A).
+    response, and a keyword survives when its count is *at least*
+    ``mu = min(alpha * n, beta)`` over the ``n`` non-abstaining responses --
+    Algorithm 1, line 15: ``W* <- {w | (w, c) in C, c >= mu}``. The official
+    implementation (inspire-group/RobustRAG, ``KeywordAgg``) deletes keywords
+    with ``count < count_threshold``, which is the same rule. The paper sets
+    alpha=0.2, beta=3 for short-answer QA.
 
-    With the lab's usual n=5 this puts mu at 1.0, so a keyword must appear in
-    at least two isolated responses to survive.
+    An earlier version of this function used ``count > mu``. That differs from
+    the paper only when ``alpha * n`` is a whole number, which at alpha=0.2
+    means n=5 -- exactly the case where all five retrieved passages are
+    poisoned and none of the isolated responses abstains.
+
+    Note what these parameters do at this lab's top-5: ``mu`` never exceeds 1.0,
+    and every counted keyword has a count of at least 1, so **the count filter
+    removes nothing**. The paper tuned alpha and beta for k=10, where n=10 gives
+    ``mu = 2.0``. At k=5 any defensive effect comes from the final step alone --
+    answering from the keyword list instead of from the passages.
     """
     answered = [text for text in responses if text.strip() and not is_abstention(text)]
     counts: dict[str, int] = {}
@@ -283,7 +299,7 @@ def keyword_aggregate(
 
     threshold = min(alpha * len(answered), beta)
     survivors = sorted(
-        (keyword for keyword, count in counts.items() if count > threshold),
+        (keyword for keyword, count in counts.items() if count >= threshold),
         key=lambda keyword: (-counts[keyword], keyword),
     )
     return KeywordAggregation(

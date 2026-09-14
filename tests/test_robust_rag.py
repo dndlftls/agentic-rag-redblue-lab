@@ -273,17 +273,38 @@ def test_abstentions_are_excluded_from_the_count() -> None:
     assert result.abstained == 1
 
 
-def test_keyword_aggregation_drops_a_singly_supported_truth() -> None:
-    """The measured failure mode, encoded as a test.
+def test_keyword_survives_at_exactly_the_threshold() -> None:
+    """Algorithm 1, line 15 keeps a keyword when ``c >= mu``, not ``c > mu``.
 
-    Four poisoned passages agree on 24 and one benign passage says 23. The
-    paper's threshold keeps the majority token and discards the minority one,
-    so the aggregation hands the attacker's claim to the final prompt. This is
-    the paper's own rule at the paper's own defaults, not a weakened version.
+    At n=5 and alpha=0.2, mu is exactly 1.0, so a keyword that appears in one
+    response survives. An earlier version used ``>`` and dropped it; that
+    changed the measured result in precisely the fully-poisoned case, where no
+    isolated response abstains and n is 5.
     """
     result = keyword_aggregate(
         ["Season 4 has 24 episodes."] * 4 + ["Season 4 has 23 episodes."]
     )
+    assert result.threshold == pytest.approx(1.0)
+    assert result.counts["23"] == 1
+    assert "23" in result.keywords
+    assert "24" in result.keywords
+
+
+def test_count_filter_removes_nothing_at_top_five() -> None:
+    """At the paper's short-QA alpha, mu never exceeds 1.0 when n <= 5.
+
+    Every counted keyword has a count of at least 1, so at this lab's top-5 the
+    filter is inert and every keyword from every answered response survives.
+    """
+    responses = ["alpha one.", "beta two.", "gamma three.", "delta four.", "omega five."]
+    result = keyword_aggregate(responses)
+    assert set(result.keywords) == set(result.counts)
+
+
+def test_count_filter_bites_at_the_papers_top_ten() -> None:
+    """The parameters were tuned for k=10, where n=10 gives mu = 2.0."""
+    result = keyword_aggregate(["Season 4 has 24 episodes."] * 9 + ["It has 23 episodes."])
+    assert result.threshold == pytest.approx(2.0)
     assert "24" in result.keywords
     assert "23" not in result.keywords
 
