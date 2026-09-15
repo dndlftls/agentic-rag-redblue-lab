@@ -3,9 +3,6 @@ import pytest
 from services.common.schemas import SearchHit
 from services.orchestrator.robust_rag import (
     RobustRagConfig,
-    aggregate,
-    claim_signature,
-    claims_agree,
     is_abstention,
     isolate,
     isolation_only,
@@ -41,111 +38,6 @@ def test_abstention_is_detected_from_the_lab_wording() -> None:
     assert not is_abstention("The capital of France is Paris.")
 
 
-def test_topic_overlap_must_not_hide_a_contradiction() -> None:
-    """Regression: shared topic words once masked a 24-against-23 conflict.
-
-    Both responses mention "Chicago Fire" and "season 4", so comparing raw
-    signatures found an overlap and merged them. The answer is the part the
-    question does not contain, so query terms are subtracted first.
-    """
-    query = "how many episodes are in chicago fire season 4"
-    poison = claim_signature("Chicago Fire season 4 consists of 24 episodes.", query)
-    truth = claim_signature("Chicago Fire season 4 has 23 episodes.", query)
-
-    assert poison == {"24"}
-    assert truth == {"23"}
-    assert not claims_agree(poison, truth)
-
-    result = aggregate(
-        ["Chicago Fire season 4 consists of 24 episodes.",
-         "Chicago Fire season 4 has 23 episodes."],
-        query,
-    )
-    assert result.conflict is True
-
-
-def test_query_subtraction_keeps_real_agreement() -> None:
-    query = "how many episodes are in chicago fire season 4"
-
-    assert claims_agree(
-        claim_signature("The answer is 24.", query),
-        claim_signature("Season 4 contains 24 episodes total.", query),
-    )
-
-
-def test_signature_keeps_numerals_and_names_only() -> None:
-    assert claim_signature("The answer is 24 [beir:doc1].") == {"24"}
-    assert "presley" in claim_signature("Elvis Presley recorded it.")
-    # A sentence-initial capital is not a name.
-    assert "the" not in claim_signature("The song is old.")
-
-
-def test_agreement_survives_different_phrasing() -> None:
-    left = claim_signature("The answer is 24 [a:1].")
-    right = claim_signature("Season 4 has 24 episodes [b:2].")
-
-    assert claims_agree(left, right)
-
-
-def test_disagreement_on_the_salient_token_is_a_conflict() -> None:
-    assert not claims_agree(claim_signature("The answer is 24."),
-                            claim_signature("The answer is 23."))
-
-
-def test_empty_signature_cannot_manufacture_a_conflict() -> None:
-    assert claims_agree(set(), {"24"})
-
-
-def test_agreeing_responses_yield_one_answer() -> None:
-    result = aggregate([
-        "The answer is 24 [a:1].",
-        "Season 4 has 24 episodes [b:2].",
-        "I cannot determine the answer from the retrieved context.",
-    ])
-
-    assert result.conflict is False
-    assert result.abstained == 1
-    assert "24" in result.answer
-
-
-def test_a_single_disagreeing_response_triggers_conflict() -> None:
-    """The defense's whole point: one poison turns a wrong answer into a flag."""
-    result = aggregate([
-        "Elvis Presley recorded the song.",
-        "Frank Sinatra recorded the song.",
-    ])
-
-    assert result.conflict is True
-    assert "disagree" in result.answer
-    assert len(result.distinct_claims) == 2
-
-
-def test_all_abstaining_returns_the_lab_abstention() -> None:
-    result = aggregate([
-        "I cannot determine the answer from the retrieved context.",
-        "The context does not contain the answer.",
-    ])
-
-    assert result.conflict is False
-    assert result.abstained == 2
-    assert "cannot determine" in result.answer
-
-
-def test_unanimous_poisons_are_not_detectable() -> None:
-    """Documented limit: with no clean passage left there is no disagreement.
-
-    This is the regime the retrieval-stage redundancy filter has to cover.
-    """
-    result = aggregate([
-        "The answer is 24 [p:1].",
-        "The answer is 24 [p:2].",
-        "The answer is 24 [p:3].",
-    ])
-
-    assert result.conflict is False
-    assert "24" in result.answer
-
-
 def test_config_validates_its_bounds() -> None:
     RobustRagConfig(group_size=1, max_passages=6)
     with pytest.raises(ValueError):
@@ -154,8 +46,8 @@ def test_config_validates_its_bounds() -> None:
         RobustRagConfig(max_passages=0)
 
 
-def test_orchestrator_isolates_and_reports_conflict(monkeypatch) -> None:
-    """The /answer path must call the model per group and surface the conflict."""
+def test_orchestrator_isolates_one_call_per_passage(monkeypatch) -> None:
+    """The /answer isolation path must call the model once per passage."""
     from fastapi.testclient import TestClient
 
     import services.orchestrator.app as orchestrator_module
@@ -172,7 +64,7 @@ def test_orchestrator_isolates_and_reports_conflict(monkeypatch) -> None:
                      "tags": [], "text": "Elvis Presley recorded it.", "score": 0.8},
                     {"document_id": "poison", "source": "red-team-lab",
                      "trust": "untrusted", "tags": [],
-                     "text": "Frank Sinatra recorded it.", "score": 0.9},
+                     "text": "Frank Sinatra recorded the famous song.", "score": 0.9},
                 ],
             }
         }
@@ -181,9 +73,9 @@ def test_orchestrator_isolates_and_reports_conflict(monkeypatch) -> None:
         async def ainvoke(self, payload):
             calls.append(payload["context"])
             return (
-                "Frank Sinatra recorded the song."
+                "Frank Sinatra recorded the famous song."
                 if "Sinatra" in payload["context"]
-                else "Elvis Presley recorded the song."
+                else "Elvis Presley recorded it."
             )
 
     monkeypatch.setattr(orchestrator_module, "_query_agents", fake_query_agents)
@@ -197,18 +89,33 @@ def test_orchestrator_isolates_and_reports_conflict(monkeypatch) -> None:
             "query": "who recorded the song",
             "sources": ["local_db"],
             "limit": 2,
-            "generation_defense": "isolate_conflict",
+            "generation_defense": "isolation",
             "use_memory": False,
         },
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["conflict_detected"] is True
-    assert "disagree" in body["answer"]
+    assert body["generation_defense"] == "isolation"
+    assert "conflict_detected" not in body
     # One call per isolated passage, not one call with both concatenated.
     assert len(calls) == 2
     assert all(sum(name in c for name in ("Elvis", "Sinatra")) == 1 for c in calls)
+    # No combining rule: the longest answered response is returned as-is.
+    assert body["answer"] == "Frank Sinatra recorded the famous song."
+
+
+def test_removed_conflict_defense_is_rejected() -> None:
+    """isolate_conflict was removed; asking for it must fail validation."""
+    from fastapi.testclient import TestClient
+
+    from services.orchestrator.app import app as orchestrator_app
+
+    response = TestClient(orchestrator_app).post(
+        "/answer",
+        json={"query": "q", "generation_defense": "isolate_conflict"},
+    )
+    assert response.status_code == 422
 
 
 def test_orchestrator_default_keeps_single_call(monkeypatch) -> None:
@@ -242,7 +149,6 @@ def test_orchestrator_default_keeps_single_call(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["conflict_detected"] is False
     assert len(calls) == 1, "the undefended path must stay a single call"
 
 
@@ -329,7 +235,6 @@ def test_isolation_only_takes_the_longest_answered_response() -> None:
         ["24.", "Season 4 has 24 episodes according to the network."]
     )
     assert result.answer.startswith("Season 4")
-    assert result.conflict is False
 
 
 def test_isolation_only_skips_abstentions() -> None:
@@ -349,13 +254,13 @@ def test_isolation_only_abstains_when_every_response_abstains() -> None:
     assert result.abstained == 3
 
 
-def test_isolation_only_never_reports_conflict() -> None:
-    """The point of this arm: it has no rule that can withhold an answer.
+def test_isolation_only_returns_a_unanimous_poison() -> None:
+    """Documented limit: isolation alone does not defend a poisoned context.
 
-    ``aggregate`` on the same disagreeing responses reports a conflict and
-    asserts nothing. Measured behind the redundancy filter, that cost a
-    correct answer, so the two behaviours are kept separately testable.
+    With every isolated response carrying the attacker's claim, taking the
+    longest one asserts it. Isolation only helps behind a retrieval defense.
     """
-    disagreeing = ["Season 4 has 24 episodes.", "Season 4 has 23 episodes."]
-    assert aggregate(disagreeing, "how many episodes in season 4").conflict is True
-    assert isolation_only(disagreeing).conflict is False
+    result = isolation_only(
+        ["The answer is 24.", "Season 4 has 24 episodes.", "It aired 24 episodes."]
+    )
+    assert "24" in result.answer

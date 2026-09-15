@@ -70,6 +70,10 @@
 
 ## 이 랩의 변형과 그 실패
 
+> **폐기됨.** `isolate_conflict`의 코드는 아래 측정과 절제 실험을 근거로 제거했다.
+> 이 절과 표의 수치는 부정 결과의 기록으로 남긴다. API에서 이 값을 요청하면 422로
+> 거부된다.
+
 변형 `isolate_conflict`는 격리는 유지하고 집계만 바꾼다. 기권하지 않은 격리
 답변들이 서로 다른 주장을 하면 어느 쪽도 단정하지 않고 **충돌을 보고**한다.
 지지 수가 아니라 불일치 여부만 보므로 정답 지지가 1개여도 작동한다는 것이
@@ -169,9 +173,10 @@ ASR이 내려가도 정답률이 오르지 않을 수 있기 때문이다(기권
   표제어도 없으므로 "Frank Sinatra"가 한 구가 아니라 두 토큰이 된다. 공식 추출기의
   재현이 아니다
   (이전 판은 "논문은 보조 LLM 호출을 쓴다"고 적었는데 사실이 아니었다.)
-- `claim_signature` / `claims_agree` / `aggregate` — 변형 쪽. 질의어를 빼고
-  비교한다. 빼지 않으면 주제어가 겹쳐 "24 episodes"와 "23 episodes"가 같은
-  주장으로 묶인다
+- `isolation_only(responses)` — 격리만 적용하고 결합 규칙 없이 가장 긴 비기권
+  답변을 반환. 필터 뒤에서만 효과가 있다
+- (폐기) `claim_signature` / `claims_agree` / `aggregate` — 변형 `isolate_conflict`의
+  충돌 탐지 코드. 제거됨
 
 **디코딩 집계는 구현하지 않았다.** 불가능해서가 아니다 — Ollama는 `logprobs`를
 노출한다. 생성 토큰마다 그룹 수만큼 호출이 필요해 5그룹 50토큰이면 질의당 250회
@@ -226,11 +231,10 @@ ASR이 내려가도 정답률이 오르지 않을 수 있기 때문이다(기권
 ## API
 
 ```
-generation_defense: "none" | "robustrag" | "isolate_conflict"
+generation_defense: "none" | "robustrag" | "isolation"
 ```
 
-`"robustrag"`가 논문 원안이다. 변형에 논문 이름을 붙이면 변형의 측정치가
-RobustRAG의 측정치로 읽히므로 이름을 분리했다. `mode`(신뢰 필터)와
+`"robustrag"`가 논문의 키워드 집계, `"isolation"`이 논문의 격리만 적용한 구성이다. `mode`(신뢰 필터)와
 `retrieval_defense`(검색 단계)와 직교한다.
 
 껐다 켜는 방법은 README의 "Switching defenses on and off"를 따른다. 요청 단위

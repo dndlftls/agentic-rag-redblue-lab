@@ -165,7 +165,7 @@ def main() -> None:
         "--generation-defenses",
         nargs="*",
         default=[],
-        choices=["none", "robustrag", "isolation", "isolate_conflict"],
+        choices=["none", "robustrag", "isolation"],
         help=(
             "Also measure the answer stage for each retrieval defense crossed "
             "with these. Costs one LLM call per passage for every combination "
@@ -285,7 +285,6 @@ def main() -> None:
                 format_context,
             )
             from services.orchestrator.robust_rag import (
-                aggregate,
                 isolate,
                 isolation_only,
                 keyword_aggregate,
@@ -303,12 +302,11 @@ def main() -> None:
             answer_chain = build_rag_chain(answer_model, mode="vulnerable")
             keyword_chain = build_keyword_chain(answer_model)
 
-            async def answer(hits, query: str, defense: str) -> tuple[str, bool]:
+            async def answer(hits, query: str, defense: str) -> str:
                 if defense == "none":
-                    text = await answer_chain.ainvoke(
+                    return await answer_chain.ainvoke(
                         {"question": query, "context": format_context(hits)}
                     )
-                    return text, False
                 isolated = [
                     await answer_chain.ainvoke(
                         {"question": query, "context": format_context(group)}
@@ -325,20 +323,16 @@ def main() -> None:
                         return (
                             "I cannot determine the answer from the retrieved "
                             "context."
-                        ), False
-                    text = await keyword_chain.ainvoke(
+                        )
+                    return await keyword_chain.ainvoke(
                         {"question": query, "keywords": ", ".join(survivors)}
                     )
-                    return text, False
-                if defense == "isolation":
-                    return isolation_only(isolated).answer, False
-                result = aggregate(isolated, query)
-                return result.answer, result.conflict
+                return isolation_only(isolated).answer
 
             async def answer_stage() -> None:
                 head = (
                     f"{'retrieval':<10} {'generation':<17} {'ASR':>6} "
-                    f"{'correct':>8} {'unclear':>8} {'conflict':>9}"
+                    f"{'correct':>8} {'unclear':>8}"
                 )
                 print(
                     f"\nAnswer stage at top-k={top_k}. ASR and correct are "
@@ -347,12 +341,12 @@ def main() -> None:
                 print(f"{head}\n{'-' * len(head)}")
                 for retrieval_defense in args.defenses:
                     for generation_defense in args.generation_defenses:
-                        succeeded = correct = unclear = conflicts = 0
+                        succeeded = correct = unclear = 0
                         for scenario in scenarios:
                             hits = retrieve(
                                 retrieval_defense, scenario["query"], top_k
                             )
-                            text, conflict = await answer(
+                            text = await answer(
                                 hits, scenario["query"], generation_defense
                             )
                             outcome, _, _ = evaluate_answer(
@@ -363,13 +357,11 @@ def main() -> None:
                             succeeded += outcome == "attack_succeeded"
                             correct += outcome == "attack_resisted"
                             unclear += outcome == "inconclusive"
-                            conflicts += conflict
                         count = len(scenarios)
                         print(
                             f"{retrieval_defense:<10} {generation_defense:<17} "
                             f"{succeeded / count:>6.2f} {correct / count:>8.2f} "
-                            f"{unclear / count:>8.2f} "
-                            f"{f'{conflicts}/{count}':>9}"
+                            f"{unclear / count:>8.2f}"
                         )
 
             asyncio.run(answer_stage())

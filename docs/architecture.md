@@ -71,13 +71,13 @@ dependence of both defenses on the retriever.
 `generation_defense` answers each retrieved passage in isolation so an injected
 passage can corrupt only its own response, then combines the responses.
 `"robustrag"` is the paper's keyword aggregation (Xiang et al., SaTML 2026);
-`"isolate_conflict"` is this lab's variant, which reports disagreement instead
-of counting. They are orthogonal to `mode` and to `retrieval_defense`, and both
-cost one LLM call per passage.
+`"isolation"` is the paper's isolation with no combining rule. They are
+orthogonal to `mode` and to `retrieval_defense`, and both cost one LLM call per
+passage.
 
-Measured against the current attack, the variant is harmful on its own and
-useful only behind the redundancy filter. See `docs/robustrag.ko.md` for the
-full table and the reasoning it overturned.
+Isolation only helps once retrieval has removed the poisons. A
+conflict-detection variant was removed after measurement; see
+`docs/robustrag.ko.md` for the full table and the ablation that decided it.
 
 ## Switching defenses off
 

@@ -26,7 +26,7 @@ Orchestrator :8000 ---- Ollama / Qwen3:8b
 - The orchestrator keeps a persistent per-session long-term memory of turns.
 - `retrieval_defense: "ragpart"`, `"ragmask"` and `"cluster"` apply
   retrieval-stage defenses that use no trust labels at all.
-- `generation_defense: "robustrag"` and `"isolate_conflict"` apply
+- `generation_defense: "robustrag"` and `"isolation"` apply
   generation-stage defenses. Every defense can be switched off.
 
 Real Google credentials, private data, and complete research datasets are not
@@ -371,28 +371,24 @@ readiness.
 
 ## Generation-stage defenses
 
-All three answer each retrieved passage in isolation, so an injected passage can
+Both answer each retrieved passage in isolation, so an injected passage can
 only corrupt its own response. They differ in how the isolated responses are
 combined.
 
 `generation_defense: "robustrag"` is RobustRAG's keyword aggregation
-(Xiang et al., SaTML 2026) at the paper's defaults: keywords appearing in more
-than `min(alpha * n, beta)` of the `n` non-abstaining responses survive, and
-the final answer is generated from the surviving keywords alone. `alpha` and
-`beta` are `ROBUSTRAG_ALPHA` and `ROBUSTRAG_BETA`.
+(Xiang et al., SaTML 2026) at the paper's short-answer parameters: keywords
+appearing in at least `min(alpha * n, beta)` of the `n` non-abstaining
+responses survive, and the final answer is generated from the surviving
+keywords alone. `alpha` and `beta` are `ROBUSTRAG_ALPHA` and `ROBUSTRAG_BETA`.
 
 `generation_defense: "isolation"` applies the isolation and nothing else,
-answering from the longest non-abstaining response. An ablation behind the
-redundancy filter measured this as the best of the three: correct 0.75 against
-0.50 for answering all passages jointly. The gain is isolation's own -- one
-passage per call leaves the model less to be distracted by.
+answering from the longest non-abstaining response. Behind the redundancy
+filter an ablation measured it at 0.75 correct, against 0.50 for answering all
+passages jointly. It is not a defense on its own: with a fully poisoned context
+every isolated response carries the attacker's claim.
 
-`generation_defense: "isolate_conflict"` adds conflict detection on top of the
-isolation: when the non-abstaining responses disagree, no answer is asserted.
-It is kept because it is measured, not because it is recommended -- it scores
-below plain isolation (0.62), since the rule can only ever withhold an answer,
-and worse than no defense at all when every retrieved passage is poisoned. See
-`docs/robustrag.ko.md`.
+A conflict-detection variant, `isolate_conflict`, was removed after measurement;
+the record is in `docs/robustrag.ko.md`.
 
 ```bash
 curl -X POST http://localhost:8000/answer \
@@ -400,13 +396,14 @@ curl -X POST http://localhost:8000/answer \
   -d '{
     "query":"What is the capital of France?",
     "sources":["local_db"],
-    "generation_defense":"isolate_conflict"
+    "retrieval_defense":"cluster",
+    "generation_defense":"isolation"
   }'
 ```
 
 The response echoes the defenses that actually ran as `retrieval_defense` and
-`generation_defense`, plus `conflict_detected` and, for `robustrag`, the
-`surviving_keywords` the answer was built from.
+`generation_defense`, plus, for `robustrag`, the `surviving_keywords` the
+answer was built from.
 
 ## Switching defenses on and off
 
@@ -423,7 +420,7 @@ Three levels of control, narrowest first:
 
 ```bash
 DEFENSES_ENABLED=false docker compose up -d orchestrator
-DEFAULT_GENERATION_DEFENSE=isolate_conflict docker compose up -d orchestrator
+DEFAULT_GENERATION_DEFENSE=isolation docker compose up -d orchestrator
 ```
 
 RAGPart additionally needs its second index built at index time

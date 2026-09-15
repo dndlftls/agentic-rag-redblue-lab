@@ -21,10 +21,10 @@ def test_omitted_defense_takes_the_deployment_default(monkeypatch) -> None:
     module = _reload(
         monkeypatch,
         DEFAULT_RETRIEVAL_DEFENSE="cluster",
-        DEFAULT_GENERATION_DEFENSE="isolate_conflict",
+        DEFAULT_GENERATION_DEFENSE="isolation",
     )
     assert module.resolve_retrieval_defense(None) == "cluster"
-    assert module.resolve_generation_defense(None) == "isolate_conflict"
+    assert module.resolve_generation_defense(None) == "isolation"
 
 
 def test_explicit_none_turns_the_defense_off_for_one_request(monkeypatch) -> None:
